@@ -19,6 +19,9 @@ from utils.load import (
 )
 from utils.eda import run_eda
 from utils.clean import run_cleaning_pipeline, impute_numeric_nan
+from utils.splitter import split_data
+from utils.model_config import get_default_mlp_config, get_default_poly_config
+from utils.training import train_model, evaluate_model, save_model_artifacts
 
 # ============================================================================
 # ИНИЦИАЛИЗАЦИЯ SESSION STATE
@@ -45,6 +48,22 @@ def init_session_state():
         st.session_state['scalers'] = {}
     if 'encoders' not in st.session_state:
         st.session_state['encoders'] = {}
+    
+    # Ключи для ML-пайплайна (Этапы 5-7)
+    if 'split_config' not in st.session_state:
+        st.session_state['split_config'] = {}
+    if 'X_train' not in st.session_state:
+        st.session_state.update({
+            'X_train': None, 'X_val': None, 'X_test': None,
+            'y_train': None, 'y_val': None, 'y_test': None,
+            'feature_names': [], 'target_names': []
+        })
+    if 'model_config' not in st.session_state:
+        st.session_state['model_config'] = None
+    if 'trained_model' not in st.session_state:
+        st.session_state['trained_model'] = None
+    if 'training_metrics' not in st.session_state:
+        st.session_state['training_metrics'] = None
 
 
 # ============================================================================
@@ -408,11 +427,248 @@ def main():
     elif tabs == "🎯 EDA":
         render_eda_tab()
     elif tabs == "🤖 Обучение модели":
-        st.header("🤖 Обучение модели")
-        st.info("Этот раздел находится в разработке. Вернитесь позже!")
+        render_training_tab()
     elif tabs == "🔮 Прогноз":
         st.header("🔮 Прогноз")
         st.info("Этот раздел находится в разработке. Вернитесь позже!")
+
+
+def render_training_tab():
+    """Рендерит вкладку разметки данных и обучения моделей (Этапы 5-7)."""
+    st.header("🤖 Обучение модели")
+    
+    # Проверка наличия данных
+    df_source = st.session_state.get('df_clean') if st.session_state.get('df_clean') is not None else st.session_state.get('df_raw')
+    
+    if df_source is None or df_source.empty:
+        st.warning("⚠️ Данные не загружены. Перейдите на вкладку **📂 Загрузка данных** или **🧹 Препроцессинг**.")
+        st.stop()
+        return
+    
+    st.success(f"✅ Доступно данных: {len(df_source)} строк × {len(df_source.columns)} колонок")
+    
+    # === ЭТАП 5: Разметка X/Y и разбиение ===
+    st.subheader("1️⃣ Разметка признаков (X) и цели (Y)")
+    
+    all_columns = df_source.columns.tolist()
+    numeric_columns = df_source.select_dtypes(include=['number']).columns.tolist()
+    
+    col_y, col_x = st.columns(2)
+    
+    with col_y:
+        y_cols = st.multiselect(
+            "Целевая переменная (Y) - 1-3 колонки:",
+            options=all_columns,
+            default=[numeric_columns[-1]] if numeric_columns else [],
+            help="Выберите колонку(и), которые модель будет предсказывать."
+        )
+    
+    with col_x:
+        x_mode = st.radio("Признаки (X):", ["Авто (все числовые кроме Y)", "Ручной выбор"], horizontal=True)
+        if x_mode == "Авто (все числовые кроме Y)":
+            x_cols = [c for c in numeric_columns if c not in y_cols]
+            st.multiselect("Выбранные признаки:", options=x_cols, default=x_cols, disabled=True)
+        else:
+            x_cols = st.multiselect(
+                "Выберите признаки вручную:",
+                options=all_columns,
+                default=[c for c in numeric_columns if c not in y_cols][:5]
+            )
+    
+    st.divider()
+    st.subheader("2️⃣ Пропорции разбиения Train/Val/Test")
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        train_size = st.number_input("Train доля", min_value=0.1, max_value=0.9, value=0.7, step=0.05)
+    with c2:
+        val_size = st.number_input("Validation доля", min_value=0.05, max_value=0.4, value=0.15, step=0.05)
+    with c3:
+        test_size = st.number_input("Test доля", min_value=0.05, max_value=0.4, value=0.15, step=0.05)
+    
+    total_split = train_size + val_size + test_size
+    if not (0.99 <= total_split <= 1.01):
+        st.error(f"⚠️ Сумма пропорций ({total_split:.2f}) должна быть равна 1.0!")
+        st.stop()
+    
+    if st.button("🔀 Выполнить разбиение", type="primary"):
+        try:
+            with st.spinner("Разбиение данных..."):
+                split_result = split_data(
+                    df=df_source,
+                    y_cols=y_cols,
+                    x_cols=x_cols if x_cols else None,
+                    train_size=train_size,
+                    val_size=val_size,
+                    test_size=test_size
+                )
+                
+                st.session_state.update({
+                    'X_train': split_result['X_train'],
+                    'X_val': split_result['X_val'],
+                    'X_test': split_result['X_test'],
+                    'y_train': split_result['y_train'],
+                    'y_val': split_result['y_val'],
+                    'y_test': split_result['y_test'],
+                    'feature_names': split_result['feature_names'],
+                    'target_names': split_result['target_names'],
+                    'split_config': {'train': train_size, 'val': val_size, 'test': test_size}
+                })
+                
+                st.success(f"✅ Разбиение выполнено! Train: {len(split_result['X_train'])}, Val: {len(split_result['X_val'])}, Test: {len(split_result['X_test'])}")
+        except Exception as e:
+            st.error(f"❌ Ошибка разбиения: {e}")
+    
+    # Отображение результатов разбиения
+    if st.session_state.get('X_train') is not None:
+        st.divider()
+        st.subheader("📊 Результаты разбиения")
+        c_res1, c_res2, c_res3 = st.columns(3)
+        c_res1.metric("Train samples", len(st.session_state['X_train']))
+        c_res2.metric("Validation samples", len(st.session_state['X_val']))
+        c_res3.metric("Test samples", len(st.session_state['X_test']))
+        
+        with st.expander("🔍 Просмотр данных (первые 5 строк)"):
+            tab_t, tab_v, tab_te = st.tabs(["Train", "Validation", "Test"])
+            import pandas as pd
+            with tab_t:
+                st.dataframe(pd.DataFrame(st.session_state['X_train'], columns=st.session_state['feature_names']).head())
+            with tab_v:
+                st.dataframe(pd.DataFrame(st.session_state['X_val'], columns=st.session_state['feature_names']).head())
+            with tab_te:
+                st.dataframe(pd.DataFrame(st.session_state['X_test'], columns=st.session_state['feature_names']).head())
+
+    # === ЭТАП 6: Конфигурация модели ===
+    st.divider()
+    st.subheader("3️⃣ Конфигурация модели")
+    
+    model_type = st.selectbox("Тип алгоритма:", ["MLPRegressor", "PolynomialRegression"])
+    
+    config = {}
+    if model_type == "MLPRegressor":
+        config = get_default_mlp_config()
+        st.markdown("**Параметры MLP:**")
+        c_mlp1, c_mlp2 = st.columns(2)
+        with c_mlp1:
+            layers = st.text_input("Слои (через запятую):", value=",".join(map(str, config['hidden_layer_sizes'])))
+            activation = st.selectbox("Activation:", ["relu", "tanh", "logistic"], index=["relu", "tanh", "logistic"].index(config['activation']))
+        with c_mlp2:
+            alpha = st.number_input("Alpha (L2 reg.):", min_value=0.00001, max_value=1.0, value=config['alpha'], format="%.5f")
+            lr_init = st.number_input("Learning rate init:", min_value=0.0001, max_value=0.1, value=config['learning_rate_init'], format="%.4f")
+        
+        early_stopping = st.checkbox("Early Stopping", value=config.get('early_stopping', True))
+        auto_tuning = st.checkbox("Auto-tuning (GridSearchCV)", value=False, help="Замедляет обучение, но подбирает лучшие параметры.")
+        
+        # Обновление конфига
+        try:
+            config['hidden_layer_sizes'] = tuple(int(x.strip()) for x in layers.split(',') if x.strip())
+        except ValueError:
+            st.error("Некорректный формат слоев. Используйте числа через запятую.")
+            config['hidden_layer_sizes'] = (100,)
+            
+        config['activation'] = activation
+        config['alpha'] = alpha
+        config['learning_rate_init'] = lr_init
+        config['early_stopping'] = early_stopping
+        
+    elif model_type == "PolynomialRegression":
+        config = get_default_poly_config()
+        st.markdown("**Параметры Polynomial Regression:**")
+        degree = st.slider("Степень полинома:", min_value=2, max_value=5, value=config['degree'])
+        alpha = st.number_input("Alpha (Ridge reg.):", min_value=0.001, max_value=100.0, value=config['alpha'], format="%.3f")
+        auto_tuning = st.checkbox("Auto-tuning (GridSearchCV)", value=False)
+        
+        config['degree'] = degree
+        config['alpha'] = alpha
+    
+    config['type'] = model_type
+    st.session_state['model_config'] = config
+    
+    with st.expander("📋 Текущий конфиг"):
+        st.json(config)
+
+    # === ЭТАП 7: Обучение ===
+    st.divider()
+    st.subheader("4️⃣ Обучение модели")
+    
+    if st.session_state.get('X_train') is None:
+        st.warning("⚠️ Сначала выполните разбиение данных (шаг 1).")
+        st.stop()
+    
+    if st.button("🚀 Запуск обучения", type="primary"):
+        try:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("Подготовка данных...")
+            progress_bar.progress(20)
+            
+            status_text.text(f"Обучение {model_type}...")
+            
+            model, metrics, loss_history = train_model(
+                X_train=st.session_state['X_train'],
+                y_train=st.session_state['y_train'],
+                X_val=st.session_state['X_val'],
+                y_val=st.session_state['y_val'],
+                config=config,
+                use_auto_tuning=auto_tuning
+            )
+            
+            progress_bar.progress(80)
+            status_text.text("Оценка на тесте...")
+            
+            test_metrics = evaluate_model(model, st.session_state['X_test'], st.session_state['y_test'])
+            
+            progress_bar.progress(100)
+            status_text.text("Сохранение...")
+            
+            # Сохранение артефактов
+            model_path = save_model_artifacts(
+                model=model,
+                metrics={**metrics, "test": test_metrics},
+                config=config,
+                feature_names=st.session_state['feature_names'],
+                target_names=st.session_state['target_names']
+            )
+            
+            # Сохранение в стейт
+            st.session_state['trained_model'] = model
+            st.session_state['training_metrics'] = {
+                "validation": metrics,
+                "test": test_metrics,
+                "loss_history": loss_history
+            }
+            
+            st.success(f"✅ Обучение завершено! Модель сохранена: `{model_path}`")
+            
+            # Визуализация метрик
+            st.subheader("📊 Метрики качества")
+            m_col1, m_col2, m_col3 = st.columns(3)
+            m_col1.metric("MAE (Val)", f"{metrics['MAE']:.4f}")
+            m_col2.metric("MSE (Val)", f"{metrics['MSE']:.4f}")
+            m_col3.metric("R² (Val)", f"{metrics['R2']:.4f}")
+            
+            st.divider()
+            st.write("**Тестовые метрики:**")
+            t_col1, t_col2, t_col3 = st.columns(3)
+            t_col1.metric("MAE (Test)", f"{test_metrics['MAE']:.4f}")
+            t_col2.metric("MSE (Test)", f"{test_metrics['MSE']:.4f}")
+            t_col3.metric("R² (Test)", f"{test_metrics['R2']:.4f}")
+            
+            # График Loss для MLP
+            if loss_history and model_type == "MLPRegressor":
+                st.divider()
+                st.subheader("📉 История обучения (Loss)")
+                import plotly.graph_objects as go
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(y=loss_history, mode='lines', name='Training Loss'))
+                fig.update_layout(title="Схождение функции потерь", xaxis_title="Итерация", yaxis_title="Loss")
+                st.plotly_chart(fig, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"❌ Ошибка обучения: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
 
 def render_eda_tab():
