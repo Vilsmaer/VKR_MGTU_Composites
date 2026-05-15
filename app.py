@@ -185,14 +185,44 @@ def display_column_editor(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     
     if changes_made:
         if st.button("💾 Применить переименование", key="apply_rename_btn"):
-            try:
-                result_df = rename_columns(df, new_names)
-                st.success(f"✅ Переименовано колонок: {len(new_names)}")
-                return result_df
-            except ValueError as ve:
-                st.error(f"Ошибка валидации: {str(ve)}")
-            except Exception as e:
-                st.error(f"Ошибка при переименовании: {str(e)}")
+            with apply_col:
+                if st.button("💾 Применить изменения", type="primary", use_container_width=True):
+                    with st.spinner("Применение изменений..."):
+                        try:
+                            df_clean, scalers_dict, encoders_dict = run_cleaning_pipeline(
+                                df=df_raw,
+                                nan_strategy=nan_strategy,
+                                rows_to_drop=rows_to_drop if rows_to_drop else None,
+                                cols_to_drop=cols_to_drop if cols_to_drop else None,
+                                scaler_type=scaler_type if scaler_type != 'none' else None,
+                                ohe_columns=ohe_columns if ohe_columns else None
+                            )
+                    
+                            st.session_state['df_clean'] = df_clean
+                            st.session_state['scalers'] = scalers_dict
+                            st.session_state['encoders'] = encoders_dict
+                    
+                            # 🆕 АВТОСОХРАНЕНИЕ В ПАПКУ data/
+                            saved_path = os.path.join('data', 'latest_cleaned.csv')
+                            os.makedirs('data', exist_ok=True)
+                            export_to_csv(df_clean, saved_path, index=False)
+                            st.info(f"📁 Датасет автоматически сохранен: `{saved_path}`")
+                    
+                            st.success("✅ Данные очищены и сохранены!")
+                            st.write(f"**Результат:** {len(df_clean)} строк × {len(df_clean.columns)} колонок")
+                            st.dataframe(df_clean.head(10), use_container_width=True, height=300)
+                    
+                            csv_clean = df_clean.to_csv(index=False, encoding='utf-8-sig', sep=';').encode('utf-8')
+                            st.download_button(
+                                label="📥 Скачать очищенные данные (CSV)",
+                                data=csv_clean,
+                                file_name="cleaned_data.csv",
+                                mime="text/csv",
+                                key="download_cleaned_csv"
+                            )
+                    
+                        except Exception as e:
+                            st.error(f"❌ Ошибка при применении изменений: {str(e)}")
     
     return None
 
@@ -509,32 +539,49 @@ def render_cleaning_tab():
 def render_eda_tab():
     """Рендерит вкладку первичного анализа данных (EDA)."""
     st.header("🎯 Первичный анализ данных (EDA)")
-    df_raw = st.session_state.get('df_raw')
     
+    # 🔄 Кнопка обновления анализа из очищенного датафрейма (без сохранения в файл)
+    if st.button("🔄 Обновить анализ (использовать данные после препроцессинга)", key="update_eda_btn"):
+        df_clean = st.session_state.get('df_clean')
+        if df_clean is not None and not df_clean.empty:
+            with st.spinner("📂 Загрузка очищенного датасета в память..."):
+                st.session_state['df_raw'] = df_clean.copy()
+                st.success("✅ Данные обновлены! EDA выполняется на очищенном датасете.")
+                st.rerun()  # Перезапускает цикл Streamlit для перерисовки с новыми данными
+        else:
+            st.warning("⚠️ Очищенные данные отсутствуют. Перейдите на вкладку **🧹 Препроцессинг** и нажмите **💾 Применить изменения**.")
+        return  # Останавливаем рендер до перезапуска
+
+    # Индикатор текущего источника данных
+    is_cleaned_source = st.session_state.get('df_clean') is not None
+    source_label = "Очищенные данные (после препроцессинга)" if is_cleaned_source else "Исходные загруженные данные"
+    st.caption(f"📌 Текущий источник для анализа: **{source_label}**")
+
+    df_raw = st.session_state.get('df_raw')
     if df_raw is None or df_raw.empty:
-        st.warning("⚠️ Данные не загружены. Перейдите на вкладку **📂 Загрузка данных**.")
+        st.warning("⚠️ Данные не загружены. Перейдите на вкладку **📂 Загрузка данных** или нажмите кнопку обновления выше.")
         st.stop()
         return
-    
+
     st.success(f"✅ Анализ данных: {len(df_raw)} строк × {len(df_raw.columns)} колонок")
-    
+
     with st.spinner("Выполнение анализа..."):
         try:
             eda_result = run_eda(df_raw)
         except Exception as e:
             st.error(f"❌ Ошибка при выполнении EDA: {str(e)}")
             return
-    
+
     metrics = eda_result.get('metrics', {})
     stats_df = eda_result.get('stats_df', pd.DataFrame())
     col_uniqueness = eda_result.get('col_uniqueness', pd.Series())
     row_uniqueness_msg = eda_result.get('row_uniqueness_msg', 'N/A')
     figures = eda_result.get('figures', {})
-    
+
     # 1. Основные метрики
     st.subheader("1️⃣ Основные метрики качества")
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         st.metric("📊 Строки / Столбцы", f"{metrics.get('rows', 0)} / {metrics.get('cols', 0)}")
     with col2:
@@ -545,46 +592,42 @@ def render_eda_tab():
     with col4:
         dup_pct = metrics.get('duplicates_pct', 0.0)
         st.metric("🔄 Дубликаты строк", f"{metrics.get('duplicates_count', 0)} ({dup_pct:.1f}%)")
-    
+
     with st.expander("📝 Детальная информация"):
         st.write(f"**Уникальность строк:** {row_uniqueness_msg}")
         if not col_uniqueness.empty:
             st.write("**% Уникальных значений (топ-10):**")
             st.bar_chart(col_uniqueness.sort_values(ascending=False).head(10))
-    
-    # 2. Графики — 3 В РЯД ✅
+
     # 2. Графики
     st.subheader("2️⃣ Визуализация")
-
     fig_missing = figures.get('missing_matrix')
     fig_types = figures.get('types_dist')
-    fig_uniqueness = figures.get('uniqueness_heatmap')  # ✅ ПОЛУЧАЕМ ТРЕТИЙ ГРАФИК
+    fig_uniqueness = figures.get('uniqueness_heatmap')
 
-    col_graph1, col_graph2, col_graph3 = st.columns(3)  # ✅ 3 КОЛОНКИ!
+    col_graph1, col_graph2, col_graph3 = st.columns(3)
 
     with col_graph1:
         if fig_types:
             st.plotly_chart(fig_types, use_container_width=True)
         else:
             st.info("Нет данных для графика типов.")
-
     with col_graph2:
         if fig_missing:
             st.plotly_chart(fig_missing, use_container_width=True)
         else:
             st.info("Нет данных для матрицы пропусков.")
-
-    with col_graph3:  # ✅ ТРЕТЬЯ КОЛОНКА
+    with col_graph3:
         if fig_uniqueness:
             st.plotly_chart(fig_uniqueness, use_container_width=True)
         else:
             st.warning("⚠️ Тепловая карта не создана")
-    
+
     # 3. Статистика
     st.subheader("3️⃣ Статистика по столбцам")
     if not stats_df.empty:
         filter_col = st.selectbox(
-            "Фильтр по типу данных:",
+            "Фильтр по типу данных: ",
             options=["Все"] + list(stats_df['Type'].unique()),
             key="eda_type_filter"
         )
