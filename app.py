@@ -22,6 +22,7 @@ from utils.clean import run_cleaning_pipeline, impute_numeric_nan
 from utils.splitter import split_data
 from utils.model_config import get_default_mlp_config, get_default_poly_config
 from utils.training import train_model, evaluate_model, save_model_artifacts
+from utils.predict import load_artifacts, preprocess_new_data, predict_batch
 
 # ============================================================================
 # ИНИЦИАЛИЗАЦИЯ SESSION STATE
@@ -429,8 +430,7 @@ def main():
     elif tabs == "🤖 Обучение модели":
         render_training_tab()
     elif tabs == "🔮 Прогноз":
-        st.header("🔮 Прогноз")
-        st.info("Этот раздел находится в разработке. Вернитесь позже!")
+        render_prediction_tab()
 
 
 def render_training_tab():
@@ -802,6 +802,116 @@ def render_eda_tab():
     else:
         st.info("Статистика недоступна.")
 
+
+def render_prediction_tab():
+    """Рендерит вкладку прогнозирования (Этап 8)."""
+    st.header("🔮 Прогнозирование")
+
+    # Загрузка артефактов из session_state
+    model = st.session_state.get('trained_model')
+    scalers = st.session_state.get('scalers', {})
+    encoders = st.session_state.get('encoders', {})
+    feature_names = st.session_state.get('feature_names', [])
+    target_names = st.session_state.get('target_names', ['Target'])
+
+    # Fallback: загрузка из файла, если сессия сброшена
+    if model is None or not feature_names:
+        st.warning("⚠️ Модель или конфигурация не найдены в текущей сессии. Загрузите сохранённый артефакт (.pkl).")
+        uploaded_pkl = st.file_uploader("Выберите файл модели:", type=["pkl"])
+        if uploaded_pkl:
+            temp_path = os.path.join("models", uploaded_pkl.name)
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_pkl.getbuffer())
+            artifact = load_artifacts(temp_path)
+            model = artifact["model"]
+            feature_names = artifact.get("feature_names", [])
+            target_names = artifact.get("target_names", ["Target"])
+            st.session_state.update({
+                "trained_model": model,
+                "feature_names": feature_names,
+                "target_names": target_names
+            })
+            st.success("✅ Модель успешно загружена из файла!")
+        else:
+            return
+
+    st.success(f"✅ Модель готова. Ожидается признаков: `{len(feature_names)}` | Целей: `{len(target_names)}`")
+
+    # Выбор режима ввода
+    pred_mode = st.radio(
+        "Режим прогнозирования:", 
+        ["📤 Загрузка CSV (пакетный)", "✍️ Ручной ввод (одна строка)"], 
+        horizontal=True
+    )
+
+    if pred_mode == "📤 Загрузка CSV (пакетный)":
+        st.subheader("Загрузите файл с новыми данными")
+        st.info("💡 Файл должен содержать исходные колонки (до препроцессинга). Кодировка UTF-8, разделитель `;` или `,`.")
+        pred_file = st.file_uploader("Выберите CSV", type=["csv"])
+
+        if pred_file:
+            try:
+                df_pred = pd.read_csv(pred_file, sep=None, engine='python', encoding='utf-8-sig')
+                st.dataframe(df_pred.head(), use_container_width=True, height=200)
+            except Exception as e:
+                st.error(f"❌ Ошибка чтения CSV: {e}")
+                return
+
+            if st.button("🚀 Рассчитать прогноз", type="primary"):
+                with st.spinner("Предобработка данных и инференс..."):
+                    try:
+                        X_processed = preprocess_new_data(df_pred, scalers, encoders, feature_names)
+                        predictions = predict_batch(model, X_processed)
+
+                        # Формирование итогового DataFrame
+                        result_df = df_pred.copy()
+                        for i, t_name in enumerate(target_names):
+                            col_values = predictions[:, i] if predictions.ndim > 1 else predictions
+                            result_df[f"Прогноз_{t_name}"] = col_values
+
+                        st.success("✅ Прогноз успешно выполнен!")
+                        st.dataframe(result_df, use_container_width=True, height=300)
+
+                        # Экспорт
+                        csv_res = result_df.to_csv(index=False, encoding='utf-8-sig', sep=';').encode('utf-8')
+                        st.download_button("📥 Скачать результаты", csv_res, "predictions.csv", "text/csv")
+                    except Exception as e:
+                        st.error(f"❌ Ошибка прогнозирования: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
+    else:
+        st.subheader("Ручной ввод параметров")
+        st.info("Введите значения для каждой колонки. Для категориальных используйте точные названия из исходных данных.")
+        
+        input_values = {}
+        cols_layout = st.columns(3)
+        
+        for i, feat in enumerate(feature_names):
+            with cols_layout[i % 3]:
+                # Определяем тип поля ввода
+                if feat in encoders:
+                    # Для OHE колонок показываем текстовое поле (пользователь вводит исходную категорию)
+                    val = st.text_input(feat, value="")
+                else:
+                    val = st.number_input(feat, value=0.0, step=0.1)
+                input_values[feat] = val
+
+        if st.button("🔮 Предсказать", type="primary"):
+            try:
+                # Преобразуем ввод в DataFrame (1 строка)
+                df_input = pd.DataFrame([input_values])
+                X_proc = preprocess_new_data(df_input, scalers, encoders, feature_names)
+                pred = predict_batch(model, X_proc)
+
+                st.success("✅ Прогноз рассчитан!")
+                metric_cols = st.columns(len(target_names))
+                for i, t_name in enumerate(target_names):
+                    val = pred[i] if len(pred) > 1 else pred[0]
+                    metric_cols[i].metric(t_name, f"{val:.4f}")
+                    
+            except Exception as e:
+                st.error(f"❌ Ошибка: {e}")
 
 def render_cleaning_tab():
     """
