@@ -1,60 +1,80 @@
 """
 Модуль прогнозирования (Inference).
-Загрузка артефактов, предобработка новых данных и инференс.
+Загружает последнюю модель, предобрабатывает новые данные и возвращает предсказания.
 """
 import pandas as pd
 import numpy as np
 import joblib
 import os
-from typing import Dict, Any, List
+import glob
+from typing import Dict, Any, Tuple, Optional
 import warnings
-warnings.filterwarnings('ignore')
 
-def load_artifacts(file_path: str) -> Dict[str, Any]:
-    """Загружает сохранённые артефакты модели (.pkl)"""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Файл не найден: {file_path}")
-    return joblib.load(file_path)
+def get_latest_model_path(models_dir: str = "models") -> Optional[str]:
+    """Находит самый последний .pkl файл в директории."""
+    if not os.path.exists(models_dir):
+        return None
+    files = glob.glob(os.path.join(models_dir, "*.pkl"))
+    return max(files, key=os.path.getmtime) if files else None
 
-def preprocess_new_data(
-    df_raw: pd.DataFrame,
-    scalers: Dict[str, Any],
-    encoders: Dict[str, Any],
-    feature_names: List[str]
+def load_latest_artifact(models_dir: str = "models") -> Tuple[Dict[str, Any], str]:
+    """Загружает артефакт последней модели."""
+    path = get_latest_model_path(models_dir)
+    if path is None:
+        raise FileNotFoundError("В папке 'models' не найдено обученных моделей. Сначала обучите модель.")
+    return joblib.load(path), path
+
+def preprocess_for_prediction(
+    df_input: pd.DataFrame,
+    feature_names: list,
+    scalers: Optional[Dict[str, Any]] = None,
+    encoders: Optional[Dict[str, Any]] = None
 ) -> pd.DataFrame:
-    """
-    Применяет сохранённые трансформации к новым данным и выравнивает колонки 
-    в точном порядке, ожидаемом моделью.
-    """
-    df = df_raw.copy()
+    """Применяет скалеры/энкодеры и выравнивает колонки под модель."""
+    df = df_input.copy()
+    if scalers:
+        for col, scaler in scalers.items():
+            if col in df.columns:
+                df[col] = scaler.transform(df[[col]]).flatten()
+    if encoders:
+        for col, encoder in encoders.items():
+            if col in df.columns:
+                encoded = encoder.transform(df[[col]].astype(str))
+                new_cols = [f"{col}_{cat}" for cat in encoder.get_feature_names_out([col])]
+                df = df.drop(columns=[col])
+                df = pd.concat([df, pd.DataFrame(encoded, columns=new_cols, index=df.index)], axis=1)
 
-    # 1. Масштабирование числовых колонок
-    for col, scaler in scalers.items():
-        if col in df.columns:
-            # flatten() нужен для избежания Shape mismatch в pandas
-            df[col] = scaler.transform(df[[col]]).flatten()
-
-    # 2. One-Hot Encoding категориальных колонок
-    for orig_col, encoder in encoders.items():
-        if orig_col in df.columns:
-            encoded = encoder.transform(df[[orig_col]].astype(str))
-            new_cols = [f"{orig_col}_{cat}" for cat in encoder.get_feature_names_out([orig_col])]
-            enc_df = pd.DataFrame(encoded, columns=new_cols, index=df.index)
-            df = df.drop(columns=[orig_col])
-            df = pd.concat([df, enc_df], axis=1)
-
-    # 3. Выравнивание с feature_names (порядок + безопасное заполнение отсутствующих)
     aligned_df = pd.DataFrame(index=df.index)
     for col in feature_names:
-        if col in df.columns:
-            aligned_df[col] = df[col]
-        else:
-            # Если модель ожидает колонку, которой нет в новых данных, заполняем 0
-            aligned_df[col] = 0.0
-
-    # Возвращаем строго в порядке обучения
+        aligned_df[col] = df[col] if col in df.columns else 0.0
     return aligned_df[feature_names]
 
-def predict_batch(model, X_processed: pd.DataFrame) -> np.ndarray:
-    """Пакетное предсказание"""
-    return model.predict(X_processed)
+def predict_from_latest_model(
+    input_data: pd.DataFrame,
+    models_dir: str = "models",
+    session_scalers: Optional[Dict] = None,
+    session_encoders: Optional[Dict] = None
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Основной пайплайн: загрузка модели -> предобработка -> прогноз."""
+    artifact, model_path = load_latest_artifact(models_dir)
+    model = artifact["model"]
+    feature_names = artifact.get("feature_names", [])
+    target_names = artifact.get("target_names", ["Target"])
+    config = artifact.get("config", {})
+    
+    scalers = artifact.get("scalers", session_scalers)
+    encoders = artifact.get("encoders", session_encoders)
+    
+    X_processed = preprocess_for_prediction(input_data, feature_names, scalers, encoders)
+    predictions = model.predict(X_processed)
+    pred_array = predictions if predictions.ndim > 1 else predictions.reshape(-1, 1)
+    
+    result_df = input_data.copy()
+    for i, t_name in enumerate(target_names):
+        result_df[f"Прогноз_{t_name}"] = pred_array[:, i]
+        
+    return result_df, {
+        "model_path": os.path.basename(model_path),
+        "model_type": config.get("type", "unknown"),
+        "targets_predicted": target_names
+    }

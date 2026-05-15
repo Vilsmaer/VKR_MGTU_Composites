@@ -9,20 +9,10 @@ import plotly.graph_objects as go
 from typing import Dict, Any, Optional, Tuple
 import warnings
 
-# Игнорируем предупреждения о смешанных типах для чистоты логов
 warnings.filterwarnings('ignore', category=UserWarning, module='plotly')
 
-
 def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Расчет основных метрик качества данных.
-    
-    Args:
-        df: Исходный DataFrame.
-        
-    Returns:
-        Словарь с метриками (строки, столбцы, NaN, дубликаты, плотность и т.д.).
-    """
+    """Расчет основных метрик качества данных."""
     if df.empty:
         return {
             "rows": 0, "cols": 0, "nan_count": 0, "nan_pct": 0.0,
@@ -31,16 +21,11 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
 
     total_cells = df.size
     nan_count = df.isna().sum().sum()
-    
-    # Защита от деления на ноль
     nan_pct = (nan_count / total_cells * 100) if total_cells > 0 else 0.0
     density_pct = 100.0 - nan_pct
-    
     dup_count = df.duplicated().sum()
-    # % дубликатов считаем от количества строк
     duplicates_pct = (dup_count / len(df) * 100) if len(df) > 0 else 0.0
-    
-    # Потребление памяти (примерное)
+
     try:
         memory_mb = df.memory_usage(deep=True).sum() / 1024 ** 2
     except Exception:
@@ -57,30 +42,17 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "memory_mb": round(memory_mb, 2)
     }
 
-
-def calculate_uniqueness(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-    """
-    Расчет процента уникальных значений для каждого столбца и строки.
-    
-    Returns:
-        (col_uniqueness, row_uniqueness) - Series с процентами.
-    """
+def calculate_uniqueness(df: pd.DataFrame) -> Tuple[pd.Series, str]:
+    """Расчет процента уникальных значений."""
     if df.empty:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+        return pd.Series(dtype=float), "0.00%"
 
-    # Уникальность по столбцам
     col_unique_counts = df.nunique(dropna=False)
     col_uniqueness = (col_unique_counts / len(df) * 100).round(2)
-    
-    # Уникальность по строкам (вычислительно дорого для больших данных, делаем сэмпл если > 10000)
+
     if len(df) > 10000:
-        # Для оптимизации считаем только на сэмпле или возвращаем заглушку
-        # В полной версии можно реализовать хеширование строк
-        row_uniqueness = pd.Series([0.0] * len(df), index=df.index, name="Row Uniqueness (%)")
-        # Быстрый расчет для небольших датасетов или сэмпла
-        sample_df = df.sample(n=1000, random_state=42) if len(df) > 1000 else df
+        sample_df = df.sample(n=1000, random_state=42)
         row_unique_counts = sample_df.drop_duplicates().shape[0]
-        # Это упрощение: глобальный % уникальных строк
         global_row_unique_pct = (row_unique_counts / len(sample_df) * 100)
         row_uniqueness_msg = f"~{global_row_unique_pct:.2f}% (оценено по сэмплу)"
     else:
@@ -90,14 +62,11 @@ def calculate_uniqueness(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
 
     return col_uniqueness, row_uniqueness_msg
 
-
 def get_column_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Детальная статистика по каждому столбцу.
-    """
+    """Детальная статистика по каждому столбцу."""
     if df.empty:
         return pd.DataFrame()
-
+    
     stats = []
     for col in df.columns:
         s = df[col]
@@ -107,7 +76,6 @@ def get_column_stats(df: pd.DataFrame) -> pd.DataFrame:
         unique = s.nunique()
         unique_pct = round((unique / len(df) * 100), 2) if len(df) > 0 else 0
         
-        # Попытка получить числовые статистики
         mean_val, std_val, min_val, max_val = "-", "-", "-", "-"
         if pd.api.types.is_numeric_dtype(s):
             mean_val = round(s.mean(), 2)
@@ -127,27 +95,22 @@ def get_column_stats(df: pd.DataFrame) -> pd.DataFrame:
             "Min": min_val,
             "Max": max_val
         })
-    
+
     return pd.DataFrame(stats)
 
-
 def plot_missing_matrix(df: pd.DataFrame) -> Optional[go.Figure]:
-    """
-    Тепловая карта пропусков (Missing Matrix).
-    """
+    """Тепловая карта пропусков."""
     if df.empty or df.size == 0:
         return None
     
-    # Создаем маску пропусков
     missing_df = df.isna()
-    # Оптимизация: если колонок очень много, берем первые 50
     if len(missing_df.columns) > 50:
         missing_df = missing_df.iloc[:, :50]
-    
+
     fig = px.imshow(
         missing_df.T, 
         aspect="auto",
-        color_continuous_scale=[[0, '#636EFA'], [1, '#EF553B']], # Синий (нет пропуска), Красный (пропуск)
+        color_continuous_scale=[[0, '#636EFA'], [1, '#EF553B']],
         labels={'x': 'Index', 'y': 'Column', 'color': 'Missing'},
         title='Матрица пропусков (Красный = NaN)',
         origin='lower'
@@ -155,17 +118,14 @@ def plot_missing_matrix(df: pd.DataFrame) -> Optional[go.Figure]:
     fig.update_layout(height=max(300, len(missing_df.columns) * 20))
     return fig
 
-
 def plot_distribution_overview(df: pd.DataFrame) -> Optional[go.Figure]:
-    """
-    Гистограмма распределения типов данных и количества уникальных значений.
-    """
+    """Гистограмма распределения типов данных."""
     if df.empty:
         return None
-
+    
     col_types = df.dtypes.astype(str).value_counts().reset_index()
     col_types.columns = ['Type', 'Count']
-    
+
     fig = px.bar(
         col_types, 
         x='Type', 
@@ -177,27 +137,41 @@ def plot_distribution_overview(df: pd.DataFrame) -> Optional[go.Figure]:
     fig.update_traces(textposition='outside')
     return fig
 
+def plot_uniqueness_heatmap(df: pd.DataFrame) -> Optional[go.Figure]:
+    """Тепловая карта уникальности значений (по ячейкам)."""
+    if df.empty or df.size == 0:
+        return None
+    
+    # Оптимизация: если колонок очень много, берем первые 50
+    display_df = df if len(df.columns) <= 50 else df.iloc[:, :50]
+    
+    # Создаем булеву маску того же размера, что и DataFrame:
+    # True, если значение встречается в столбце ровно 1 раз (уникально)
+    uniqueness_mask = display_df.apply(lambda col: col.map(col.value_counts()) == 1)
+    
+    fig = px.imshow(
+        uniqueness_mask.T, 
+        aspect="auto",
+        color_continuous_scale=[[0, '#EF553B'], [1, '#00CC96']], # 0=Повтор, 1=Уникально
+        labels={'x': 'Index', 'y': 'Column', 'color': 'Uniqueness'},
+        title='Тепловая карта уникальности (Зеленый = Уникальное значение)',
+        origin='lower'
+    )
+    fig.update_layout(height=max(300, len(uniqueness_mask.columns) * 20))
+    return fig
 
 def run_eda(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Главная функция EDA. Агрегирует все метрики и графики.
-    
-    Args:
-        df: DataFrame для анализа.
-        
-    Returns:
-        Словарь с результатами: metrics, stats_df, uniqueness_msg, figures.
     """
-    # TODO: Добавить анализ выбросов (IQR/Z-score) в будущих версиях
-    # TODO: Добавить корреляционную матрицу для числовых признаков
-    
     metrics = calculate_metrics(df)
     col_uniq, row_uniq_msg = calculate_uniqueness(df)
     stats_df = get_column_stats(df)
-    
+
     fig_missing = plot_missing_matrix(df)
     fig_types = plot_distribution_overview(df)
-    
+    fig_uniqueness = plot_uniqueness_heatmap(df)  # ✅ ДОБАВЛЕНО
+
     return {
         "metrics": metrics,
         "stats_df": stats_df,
@@ -205,6 +179,7 @@ def run_eda(df: pd.DataFrame) -> Dict[str, Any]:
         "row_uniqueness_msg": row_uniq_msg,
         "figures": {
             "missing_matrix": fig_missing,
-            "types_dist": fig_types
+            "types_dist": fig_types,
+            "uniqueness_heatmap": fig_uniqueness  # ✅ ДОБАВЛЕНО
         }
     }
